@@ -2,10 +2,12 @@ from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls, CONFIG_DISPATCHER, MAIN_DISPATCHER
 from ryu.ofproto import ofproto_v1_3
+from ryu.ofproto import inet, ether
 from ryu.topology import event, switches
 from ryu.topology.api import get_all_switch, get_all_link, get_all_host
-from ryu.lib.packet import packet, ethernet, ether_types
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, tcp
 import networkx as nx
+import re
 
 DEFAULT_CONNECTION_THRESHOLD = 5
 TCP_CONNECTION_THRESHOLD = 0
@@ -14,10 +16,10 @@ with open('config.txt', 'r') as file:
     match = re.search(r'THRESHOLD\s*=\s*(\d+)', file.read())
     if match:
         TCP_CONNECTION_THRESHOLD = int(match.group(1))
-        print "Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s"
+        print("Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s")
     else:
         TCP_CONNECTION_THRESHOLD = DEFAULT_CONNECTION_THRESHOLD
-        print "Using Default Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s"
+        print("Using Default Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s")
 
 
 elephants = []
@@ -25,6 +27,7 @@ elephants = []
 class ElephantManager(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
+    #Default Config
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
@@ -33,7 +36,7 @@ class ElephantManager(app_manager.RyuApp):
 
         inst = [
             parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_AtCTIONS,
+                ofproto.OFPIT_APPLY_ACTIONS,
                 [
                     parser.OFPActionOutput(
                         ofproto.OFPP_CONTROLLER,
@@ -79,6 +82,8 @@ class ElephantManager(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
 
+        match = msg.match
+
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
@@ -97,16 +102,27 @@ class ElephantManager(app_manager.RyuApp):
         else:
             output_port = self.find_next_hop_to_destination(datapath.id,dst_dpid)
 
+        actions = [ parser.OFPActionOutput(output_port) ]
+        out = parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=msg.buffer_id,
+            in_port=in_port,
+            actions=actions,
+            data=msg.data
+        )
+        datapath.send_msg(out)
+
         # print "DP: ", datapath.id, "Host: ", pkt_ip.dst, "Port: ", output_port
 
+        # Elephant Finder
         if eth.ethertype == ether_types.ETH_TYPE_IP:
-            ip = pkt.get_protocol(ipv4.ipv4)
-            tcp = pkt.get_protocol(tcp.tcp)
-            if tcp:
-                src_ip = ip.src
-                dst_ip = ip.dst
-                src_port = tcp.src_port
-                dst_port = tcp.dst_port
+            ip_proto = match.get('ip_proto')
+            if ip_proto == inet.IPPROTO_TCP:
+                src_ip = match.get('ipv4_src')
+                dst_dpid_ip = match.get('ipv4_src')
+                src_port = match.get('tcp_src')
+                dst_port = match.get('tcp_dst')
+
                 key = (src_ip, dst_ip, src_port, dst_port)
 
                 if key not in self.elephants:
@@ -118,7 +134,8 @@ class ElephantManager(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=in_port, eth_type=eth.ethertype,
                                             ipv4_src=src_ip, ipv4_dst=dst_ip,
                                             tcp_src=src_port, tcp_dst=dst_port)
-                    actions = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)] 
+                    actions = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
+                    inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS,actions)]
                     mod = parser.OFPFlowMod(
                         datapath=datapath,
                         priority=10,
@@ -126,15 +143,3 @@ class ElephantManager(app_manager.RyuApp):
                         instructions=inst
                     )
                     datapath.send_msg(mod)
-
-
-
-        actions = [ parser.OFPActionOutput(output_port) ]
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=msg.buffer_id,
-            in_port=in_port,
-            actions=actions,
-            data=msg.data
-        )
-        datapath.send_msg(out)
