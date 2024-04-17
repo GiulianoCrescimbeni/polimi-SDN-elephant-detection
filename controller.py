@@ -114,7 +114,7 @@ class ElephantManager(app_manager.RyuApp):
 
                 current_time = time.time()
 
-                if current_time - self.elephants[key] > TCP_CONNECTION_THRESHOLD:
+                if current_time - self.elephants[key] >= TCP_CONNECTION_THRESHOLD:
                     match = parser.OFPMatch(in_port=in_port, eth_type=eth.ethertype,
                                             ipv4_src=src_ip, ipv4_dst=dst_ip,
                                             tcp_src=src_port, tcp_dst=dst_port)
