@@ -7,8 +7,22 @@ from ryu.topology.api import get_all_switch, get_all_link, get_all_host
 from ryu.lib.packet import packet, ethernet, ether_types
 import networkx as nx
 
+DEFAULT_CONNECTION_THRESHOLD = 5
+TCP_CONNECTION_THRESHOLD = 0
 
-class HopByHopSwitch(app_manager.RyuApp):
+with open('config.txt', 'r') as file:
+    match = re.search(r'THRESHOLD\s*=\s*(\d+)', file.read())
+    if match:
+        TCP_CONNECTION_THRESHOLD = int(match.group(1))
+        print "Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s"
+    else:
+        TCP_CONNECTION_THRESHOLD = DEFAULT_CONNECTION_THRESHOLD
+        print "Using Default Connection Threshold: ", TCP_CONNECTION_THRESHOLD, "s"
+
+
+elephants = []
+
+class ElephantManager(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -19,7 +33,7 @@ class HopByHopSwitch(app_manager.RyuApp):
 
         inst = [
             parser.OFPInstructionActions(
-                ofproto.OFPIT_APPLY_ACTIONS,
+                ofproto.OFPIT_APPLY_AtCTIONS,
                 [
                     parser.OFPActionOutput(
                         ofproto.OFPP_CONTROLLER,
@@ -35,7 +49,6 @@ class HopByHopSwitch(app_manager.RyuApp):
         )
         datapath.send_msg(mod)
 
-    # trova switch destinazione e porta dello switch
     def find_destination_switch(self,destination_mac):
         for host in get_all_host(self):
             if host.mac == destination_mac:
@@ -69,28 +82,52 @@ class HopByHopSwitch(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
-        # ignora pacchetti non IPv4 (es. ARP, LLDP)
         if eth.ethertype != ether_types.ETH_TYPE_IP:
             return
 
         destination_mac = eth.dst
 
-        # trova switch destinazione
         (dst_dpid, dst_port) = self.find_destination_switch(destination_mac)
 
-        # host non trovato
         if dst_dpid is None:
-            # print "DP: ", datapath.id, "Host not found: ", pkt_ip.dst
             return
 
         if dst_dpid == datapath.id:
-            # da usare se l'host e' direttamente collegato
             output_port = dst_port    
         else:
-            # host non direttamente collegato
             output_port = self.find_next_hop_to_destination(datapath.id,dst_dpid)
 
         # print "DP: ", datapath.id, "Host: ", pkt_ip.dst, "Port: ", output_port
+
+        if eth.ethertype == ether_types.ETH_TYPE_IP:
+            ip = pkt.get_protocol(ipv4.ipv4)
+            tcp = pkt.get_protocol(tcp.tcp)
+            if tcp:
+                src_ip = ip.src
+                dst_ip = ip.dst
+                src_port = tcp.src_port
+                dst_port = tcp.dst_port
+                key = (src_ip, dst_ip, src_port, dst_port)
+
+                if key not in self.elephants:
+                    self.elephants[key] = (time.time())
+
+                current_time = time.time()
+
+                if current_time - self.elephants[key] > TCP_CONNECTION_THRESHOLD:
+                    match = parser.OFPMatch(in_port=in_port, eth_type=eth.ethertype,
+                                            ipv4_src=src_ip, ipv4_dst=dst_ip,
+                                            tcp_src=src_port, tcp_dst=dst_port)
+                    actions = [parser.OFPActionOutput(ofproto.OFPP_NORMAL)] 
+                    mod = parser.OFPFlowMod(
+                        datapath=datapath,
+                        priority=10,
+                        match=match,
+                        instructions=inst
+                    )
+                    datapath.send_msg(mod)
+
+
 
         actions = [ parser.OFPActionOutput(output_port) ]
         out = parser.OFPPacketOut(
