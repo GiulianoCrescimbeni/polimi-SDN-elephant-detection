@@ -1,15 +1,3 @@
-"""
- - Nel codice ci sono tanti print che ho messo per capire se stessi facendo la cosa giusta, si possono eliminare tranquillamente.
- - La sezione riguardante la lettura da file è commentata perchè sul mio PC non vuole funzionare per qualche motivo, ma questo probabilmente succede perchè non ho installato correttamente qualcosa ma non ho voglia di correggerlo.
- - Bug da (provare) a risolvere:
-    In una topologia lineare con 3 switch e 3 host, se settiamo un server in h1 e il client in h3 il conteggio dei pacchetti avviene regolarmente,
-    mentre se dopo aver raggiunto il THRESHOLD invertissimo host e client il conteggio dei pacchetti non è più corretto, salta la conta di alcuni pacchetti
-    Possibili soluzioni:
-    - Scrivere delle regole diverse per gestire questa casistica
-    - Ignorare e sperare che il prof non se ne accorga (possibile perchè in tutti gli altri casi funziona senza problemi)
-by Angelo
-"""
-
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls, CONFIG_DISPATCHER, MAIN_DISPATCHER
@@ -18,28 +6,104 @@ from ryu.topology import event, switches
 from ryu.topology.api import get_all_switch, get_all_link, get_all_host
 from ryu.lib.packet import packet, ethernet, ether_types, ipv4, tcp
 import networkx as nx
+import re
+import time
+import threading
 
-DEFAULT_PACKET_THRESHOLD = 20  # Soglia predefinita per il numero di pacchetti
+DEFAULT_PACKET_THRESHOLD = 2000  # Soglia predefinita per il numero di pacchetti
+DEFAULT_SECONDS_BETWEEN_ANALYSIS = 30 # Soglia predefinita per la frequenza di analisi delle connessioni elefanti
+DEFAULT_ELEPHANT_PACKET_THRESHOLD = 1000 # Soglia predefinita per l'inattività di una connessione in n°pacchetti
 PACKET_THRESHOLD = 0
+SECONDS_BETWEEN_ANALYSIS = 0
+ELEPHANT_PACKET_THRESHOLD = 0
 
-# Caricamento della soglia di pacchetti dal file di configurazione
-#with open('config.txt', 'r') as file:
-    #match = re.search(r'PACKET_THRESHOLD\s*=\s*(\d+)', file.read())
-    #if match:
-        #PACKET_THRESHOLD = int(match.group(1))
-        #print("Packet Threshold:", PACKET_THRESHOLD)
-    #else:
-PACKET_THRESHOLD = DEFAULT_PACKET_THRESHOLD
-print("Using Default Packet Threshold:", PACKET_THRESHOLD)
+# Caricamento delle configurazioni
+with open('config.txt', 'r') as file:
+    packet_threshold_found = False
+    seconds_between_analysis_found = False
+    elephant_packet_threshold_found = False
+    for line in file:
+        packet_threshold_match = re.search(r'PACKET_THRESHOLD\s*=\s*(\d+)', line)
+        seconds_between_analysis_match = re.search(r'SECONDS_BETWEEN_ANALYSIS\s*=\s*(\d+)', line)
+        elephant_packet_threshold_match = re.search(r'ELEPHANT_PACKET_THRESHOLD\s*=\s*(\d+)', line)
+        if packet_threshold_match:
+            PACKET_THRESHOLD = int(packet_threshold_match.group(1))
+            packet_threshold_found = True
+        elif seconds_between_analysis_match:
+            SECONDS_BETWEEN_ANALYSIS = int(seconds_between_analysis_match.group(1))
+            seconds_between_analysis_found = True
+        elif elephant_packet_threshold_match:
+            ELEPHANT_PACKET_THRESHOLD = int(elephant_packet_threshold_match.group(1))
+            elephant_packet_threshold_found = True
 
+    if packet_threshold_found:
+        print("Packet threshold:", PACKET_THRESHOLD)
+    else:
+        PACKET_THRESHOLD = DEFAULT_PACKET_THRESHOLD
+        print("Using default packet threshold:", PACKET_THRESHOLD)
+    if seconds_between_analysis_found:
+        print("Seconds between analysis:", SECONDS_BETWEEN_ANALYSIS)
+    else:
+        SECONDS_BETWEEN_ANALYSIS = DEFAULT_SECONDS_BETWEEN_ANALYSIS
+        print("Using default seconds between analysis:", SECONDS_BETWEEN_ANALYSIS)
+    if elephant_packet_threshold_found:
+        print("Elephant packet threshold:", ELEPHANT_PACKET_THRESHOLD)
+    else:
+        ELEPHANT_PACKET_THRESHOLD = DEFAULT_ELEPHANT_PACKET_THRESHOLD
+        print("Using default elephant packet threshold:", ELEPHANT_PACKET_THRESHOLD)
+
+# Struttura dati per contenere le connessioni
 elephants = {}
-hop_number_max = 1
-latest_dst_mac = None
+
+def check_inactive_connections():
+        while True:
+            for key, value in elephants.items():
+                packet_count, route, isElephant, statsReq = value
+                current_time = time.time()
+                if isElephant == True:
+                    datapath = route[0]
+                    ofproto = datapath.ofproto
+                    parser = datapath.ofproto_parser
+
+                    match = parser.OFPMatch(eth_dst=key[0], eth_src=key[1])
+                    req = parser.OFPFlowStatsRequest(datapath, match=match)
+
+                    datapath.send_msg(req)
+
+                    print(req)
+                    print("FlowStatsRequest inviato a " + str(datapath.id))
+
+                    elephants[(key[0], key[1])] = (value[0], value[1], value[2], True)
+
+            time.sleep(SECONDS_BETWEEN_ANALYSIS)
+
+# Avvio del thread per verifica di inattività delle connessioni
+thread = threading.Thread(target=check_inactive_connections)
+thread.daemon = True
+thread.start()
 
 class ElephantManager(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    
+    def find_destination_switch(self, mac_destination):
+        for host in get_all_host(self):
+            if host.mac == mac_destination:
+                return (host.port.dpid, host.port.port_no)
+        return (None, None)
+    
+    def find_next_host_destination(self, source_id, destination_id):
+        topo = nx.DiGraph()
+
+        for link in get_all_link(self):
+            topo.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
+
+        path = nx.shortest_path(topo, source_id, destination_id)
+
+        link_next_hop = topo[path[0]][path[1]]
+        return link_next_hop['port']
+
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
-    def switch_fehop_number_maxatures_handler(self, ev):
+    def _config_dispatcher_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -61,41 +125,9 @@ class ElephantManager(app_manager.RyuApp):
             instructions=inst
         )
         datapath.send_msg(mod)
-    
-    def find_destination_switch(self, mac_destination):
-        for host in get_all_host(self):
-            if host.mac == mac_destination:
-                return (host.port.dpid, host.port.port_no)
-        return (None, None)
-    
-    def find_next_host_destination(self, source_id, destination_id):
-        topo = nx.DiGraph()
-
-        for link in get_all_link(self):
-            topo.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
-
-        path = nx.shortest_path(topo, source_id, destination_id)
-
-        link_next_hop = topo[path[0]][path[1]]
-        return link_next_hop['port']
-
-    #Conta numero di hop presenti nel percorso del pacchetto
-    def calculate_total_hops(self, source_id, destination_id):
-        # Creare un grafo diretto per rappresentare la topologia della rete
-        topo = nx.DiGraph()
-
-        # Aggiungere gli archi al grafo in base ai collegamenti tra gli switch
-        for link in get_all_link(self):
-            topo.add_edge(link.src.dpid, link.dst.dpid)
-
-        path = nx.shortest_path(topo, source_id, destination_id)
-        total_hops = len(path)
-        return total_hops
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
-        global hop_number_max
-        global latest_dst_mac
 
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
@@ -111,6 +143,7 @@ class ElephantManager(app_manager.RyuApp):
             return
         
         mac_dst = eth.dst
+        mac_src = eth.src
 
         #Trovare lo switch destinazione
         dpid, port_no = self.find_destination_switch(mac_dst)
@@ -137,15 +170,10 @@ class ElephantManager(app_manager.RyuApp):
 
         datapath.send_msg(out)
 
-        src_mac = eth.src
-        dst_mac = eth.dst
-        hop_number = self.calculate_total_hops(datapath.id, dpid)
-        if(latest_dst_mac!=dst_mac): #Se il pacchetto da trattare è diverso dall'ultimo pacchetto, aggiorna il latest_dst_mac e riporta a 1 hop_number_max
-            latest_dst_mac=dst_mac
-            hop_number_max=1
-        if(hop_number_max<hop_number):
-            hop_number_max = hop_number #hop_number_max conterrà il numero di hop che il pacchetto deve attraversare
-        print(f"Hop number: {hop_number}\nHop number max: {hop_number_max}")
+        dpid, port_no = self.find_destination_switch(mac_src)
+
+        if dpid is None or port_no is None:
+            return
 
         # Controllare se il pacchetto è IPV4
         if eth.ethertype != ether_types.ETH_TYPE_IP:
@@ -159,31 +187,35 @@ class ElephantManager(app_manager.RyuApp):
         tcp_pkt = pkt.get_protocol(tcp.tcp)
         if not tcp_pkt:
             return
-        # Rilevamento degli elefanti basato sul numero di pacchetti
-        print(f"SOURCE: {src_mac}")
-        print(f"DESTINATION: {dst_mac}")
-        if (src_mac, dst_mac) not in elephants:
-            elephants[(src_mac, dst_mac)] = (1/hop_number_max)
-        else:
-            elephants[(src_mac, dst_mac)] += (1/hop_number_max) #Per evitare che lo stesso pacchetto venga contato più volte
-        print(elephants[(src_mac, dst_mac)])
-        print(f"Calcolo:{1/hop_number_max}")
-        print(f"Nuovo MAX: {hop_number_max}\n")
-        print(elephants)
-        #if(elephants[(src_mac, dst_mac)] != elephants[(dst_mac, src_mac)]): #Ogni tanto il conteggio dei pacchetti impazzisce
-            #tmp = max(elephants[(src_mac, dst_mac)], elephants[(dst_mac, src_mac)])
-            #elephants[(src_mac, dst_mac)] = tmp
-            #elephants[(dst_mac, src_mac)] = tmp
 
-        if elephants[(src_mac, dst_mac)] >= PACKET_THRESHOLD:
-            print(f"Elefante identificato da {src_mac} verso {dst_mac}")
-            #Inserire la regola sullo switch
+        #Verifica che l'host sorgente sia direttamente collegato allo switch
+        if datapath.id == dpid:
+            #Aggiorno il contatore di pacchetti solo se il mac sorgente è collegato allo switch
+            if (mac_src, mac_dst) not in elephants:
+                elephants[(mac_src, mac_dst)] = (1, [datapath], False, False)
+                packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+
+            else:
+                packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+                elephants[(mac_src, mac_dst)] = (packet_count + 1, route, False, False)
+
+        packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+        if datapath not in route:
+                route.append(datapath)
+                elephants[(mac_src, mac_dst)] = (packet_count, route, isElephant, statsReq)
+
+        print("Number of packets -> ", packet_count)
+        print("Route -> ", elephants[(mac_src, mac_dst)][1])
+        
+        if elephants[(mac_src, mac_dst)][0] >= PACKET_THRESHOLD:
+            elephants[(mac_src, mac_dst)] = (packet_count, route, True, False)
+            print(f"Elefante identificato da {mac_src} verso {mac_dst}")
+            #Inserire la regola sullo switch per l'instradamento diretto dei pacchetti
             datapath = ev.msg.datapath
             ofproto = datapath.ofproto
             parser = datapath.ofproto_parser
 
-            match = parser.OFPMatch(eth_dst = dst_mac)
-
+            match = parser.OFPMatch(eth_src = mac_src, eth_dst = mac_dst)
             actions = parser.OFPActionOutput(output_port)
 
             inst = [
@@ -192,6 +224,7 @@ class ElephantManager(app_manager.RyuApp):
                     [actions]
                 )
             ]
+
             mod = parser.OFPFlowMod(
                 datapath=datapath,
                 priority=10,
@@ -199,3 +232,39 @@ class ElephantManager(app_manager.RyuApp):
                 instructions=inst
             )
             datapath.send_msg(mod)
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        # Estrai il messaggio di risposta dalle statistiche di flusso
+        msg = ev.msg
+        for stat in msg.body:
+            match = stat.match
+            if 'eth_src' in match:
+                mac_src = match['eth_src']
+                mac_dst = match['eth_dst']
+                packet_count_stat = stat.packet_count
+                if elephants.get((mac_src, mac_dst)):
+                    packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+                    
+                    if statsReq:
+                        print(f"Switch {ev.msg.datapath.id}: {mac_src} -> {mac_dst} - Packet Count: {packet_count_stat}")
+
+                        packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+                        print("Attività in pacchetti: " + str(packet_count_stat - packet_count))
+                        if packet_count_stat - packet_count < ELEPHANT_PACKET_THRESHOLD:
+                            print(f"Connessione inattiva, rimuovo la connessione: {mac_src} -> {mac_dst}")
+                            for switch in route:
+                                datapath = switch
+                                ofproto = datapath.ofproto 
+                                parser = datapath.ofproto_parser
+                                match = parser.OFPMatch(eth_src=mac_src, eth_dst=mac_dst)
+                                mod = parser.OFPFlowMod(
+                                    datapath=datapath,
+                                    command=ofproto.OFPFC_DELETE,
+                                    priority=10,
+                                    match=match
+                                )
+                                datapath.send_msg(mod)
+                            elephants.pop((mac_src, mac_dst))
+                        else:
+                            elephants[(mac_src, mac_dst)] = (packet_count_stat, route, True, False)
