@@ -260,9 +260,11 @@ class ElephantManager(app_manager.RyuApp):
                                 match = parser.OFPMatch(eth_src=mac_src, eth_dst=mac_dst)
                                 mod = parser.OFPFlowMod(
                                     datapath=datapath,
-                                    command=ofproto.OFPFC_DELETE,
                                     priority=10,
-                                    match=match
+                                    match=match,
+                                    command=ofproto.OFPFC_DELETE,
+                                    out_port=ofproto.OFPP_ANY,
+                                    out_group=ofproto.OFPG_ANY
                                 )
                                 datapath.send_msg(mod)
                             elephants.pop((mac_src, mac_dst))
