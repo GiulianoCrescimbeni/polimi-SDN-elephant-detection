@@ -4,7 +4,7 @@ from ryu.controller.handler import set_ev_cls, CONFIG_DISPATCHER, MAIN_DISPATCHE
 from ryu.ofproto import ofproto_v1_3
 from ryu.topology import event, switches
 from ryu.topology.api import get_all_switch, get_all_link, get_all_host
-from ryu.lib.packet import packet, ethernet, ether_types, ipv4, tcp
+from ryu.lib.packet import packet, ethernet, ether_types, ipv4, tcp, arp
 import networkx as nx
 import re
 import time
@@ -137,101 +137,146 @@ class ElephantManager(app_manager.RyuApp):
         #Parsing del pacchetto
         pkt = packet.Packet(ev.msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
+        arp_in = pkt.get_protocol(arp.arp)
 
-        #Controllare se il pacchetto è IPV4
-        if eth.ethertype != ether_types.ETH_TYPE_IP:
-            return
-        
-        mac_dst = eth.dst
-        mac_src = eth.src
+        if arp_in:
+            assert arp_in.opcode == arp.ARP_REQUEST
+            destination_host_mac = None
 
-        #Trovare lo switch destinazione
-        dpid, port_no = self.find_destination_switch(mac_dst)
+            host_list = get_all_host(self)
+            for host in host_list:
+                if arp_in.dst_ip in host.ipv4:
+                    destination_host_mac = host.mac
+                    break
 
-        if dpid is None or port_no is None:
-            return
+            # Host non trovato
+            if destination_host_mac is None:
+                return
 
-        #Trovare il percorso più breve verso lo switch destinazione
-        if datapath.id == dpid:
-            output_port = port_no
-        else:
-            output_port = self.find_next_host_destination(datapath.id, dpid)
+            pkt_out = packet.Packet()
+            eth_out = ethernet.ethernet(
+                dst = eth_in.src,
+                src = destination_host_mac,
+                ethertype = ether_types.ETH_TYPE_ARP
+            )
+            arp_out = arp.arp(
+                opcode  = arp.ARP_REPLY,
+                src_mac = destination_host_mac,
+                src_ip  = arp_in.dst_ip,
+                dst_mac = arp_in.src_mac,
+                dst_ip  = arp_in.src_ip
+            )
+            pkt_out.add_protocol(eth_out)
+            pkt_out.add_protocol(arp_out)
+            pkt_out.serialize()
 
-        #Inoltrare il pacchetto verso la destinazione
-        actions = [parser.OFPActionOutput(output_port)]
-
-        out = parser.OFPPacketOut(
-            datapath = datapath,
-            buffer_id = ev.msg.buffer_id,
-            in_port = input_port,
-            actions = actions,
-            data = ev.msg.data
-        )
-
-        datapath.send_msg(out)
-
-        dpid, port_no = self.find_destination_switch(mac_src)
-
-        if dpid is None or port_no is None:
-            return
-
-        # Controllare se il pacchetto è IPV4
-        if eth.ethertype != ether_types.ETH_TYPE_IP:
-            return
-        
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
-        if not ip_pkt:
-            return
-        
-        #Controllare il protocollo
-        tcp_pkt = pkt.get_protocol(tcp.tcp)
-        if not tcp_pkt:
-            return
-
-        #Verifica che l'host sorgente sia direttamente collegato allo switch
-        if datapath.id == dpid:
-            #Aggiorno il contatore di pacchetti solo se il mac sorgente è collegato allo switch
-            if (mac_src, mac_dst) not in elephants:
-                elephants[(mac_src, mac_dst)] = (1, [datapath], False, False)
-                packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
-
-            else:
-                packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
-                elephants[(mac_src, mac_dst)] = (packet_count + 1, route, False, False)
-
-        packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
-        if datapath not in route:
-                route.append(datapath)
-                elephants[(mac_src, mac_dst)] = (packet_count, route, isElephant, statsReq)
-
-        print("Number of packets -> ", packet_count)
-        print("Route -> ", elephants[(mac_src, mac_dst)][1])
-        
-        if elephants[(mac_src, mac_dst)][0] >= PACKET_THRESHOLD:
-            elephants[(mac_src, mac_dst)] = (packet_count, route, True, False)
-            print(f"Elefante identificato da {mac_src} verso {mac_dst}")
-            #Inserire la regola sullo switch per l'instradamento diretto dei pacchetti
-            datapath = ev.msg.datapath
-            ofproto = datapath.ofproto
-            parser = datapath.ofproto_parser
-
-            match = parser.OFPMatch(eth_src = mac_src, eth_dst = mac_dst)
-            actions = parser.OFPActionOutput(output_port)
-
-            inst = [
-                parser.OFPInstructionActions(
-                    ofproto.OFPIT_APPLY_ACTIONS,
-                    [actions]
+            actions = [
+                parser.OFPActionOutput(
+                    in_port
                 )
             ]
 
-            mod = parser.OFPFlowMod(
+            out = parser.OFPPacketOut(
                 datapath=datapath,
-                priority=10,
-                match = match,
-                instructions=inst
+                buffer_id=ofproto.OFP_NO_BUFFER,
+                in_port=ofproto.OFPP_CONTROLLER,
+                actions=actions,
+                data=pkt_out.data
             )
-            datapath.send_msg(mod)
+            datapath.send_msg(out)
+        
+        else:
+
+            #Controllare se il pacchetto è IPV4
+            if eth.ethertype != ether_types.ETH_TYPE_IP:
+                return
+            
+            mac_dst = eth.dst
+            mac_src = eth.src
+
+            #Trovare lo switch destinazione
+            dpid, port_no = self.find_destination_switch(mac_dst)
+
+            if dpid is None or port_no is None:
+                return
+
+            #Trovare il percorso più breve verso lo switch destinazione
+            if datapath.id == dpid:
+                output_port = port_no
+            else:
+                output_port = self.find_next_host_destination(datapath.id, dpid)
+
+            #Inoltrare il pacchetto verso la destinazione
+            actions = [parser.OFPActionOutput(output_port)]
+
+            out = parser.OFPPacketOut(
+                datapath = datapath,
+                buffer_id = ev.msg.buffer_id,
+                in_port = input_port,
+                actions = actions,
+                data = ev.msg.data
+            )
+
+            datapath.send_msg(out)
+
+            dpid, port_no = self.find_destination_switch(mac_src)
+
+            if dpid is None or port_no is None:
+                return
+            
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+            if not ip_pkt:
+                return
+            
+            #Controllare il protocollo
+            tcp_pkt = pkt.get_protocol(tcp.tcp)
+            if not tcp_pkt:
+                return
+
+            #Verifica che l'host sorgente sia direttamente collegato allo switch
+            if datapath.id == dpid:
+                #Aggiorno il contatore di pacchetti solo se il mac sorgente è collegato allo switch
+                if (mac_src, mac_dst) not in elephants:
+                    elephants[(mac_src, mac_dst)] = (1, [datapath], False, False)
+                    packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+
+                else:
+                    packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+                    elephants[(mac_src, mac_dst)] = (packet_count + 1, route, False, False)
+
+            packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
+            if datapath not in route:
+                    route.append(datapath)
+                    elephants[(mac_src, mac_dst)] = (packet_count, route, isElephant, statsReq)
+
+            print("Number of packets -> ", packet_count)
+            print("Route -> ", elephants[(mac_src, mac_dst)][1])
+            
+            if elephants[(mac_src, mac_dst)][0] >= PACKET_THRESHOLD:
+                elephants[(mac_src, mac_dst)] = (packet_count, route, True, False)
+                print(f"Elefante identificato da {mac_src} verso {mac_dst}")
+                #Inserire la regola sullo switch per l'instradamento diretto dei pacchetti
+                datapath = ev.msg.datapath
+                ofproto = datapath.ofproto
+                parser = datapath.ofproto_parser
+
+                match = parser.OFPMatch(eth_src = mac_src, eth_dst = mac_dst)
+                actions = parser.OFPActionOutput(output_port)
+
+                inst = [
+                    parser.OFPInstructionActions(
+                        ofproto.OFPIT_APPLY_ACTIONS,
+                        [actions]
+                    )
+                ]
+
+                mod = parser.OFPFlowMod(
+                    datapath=datapath,
+                    priority=10,
+                    match = match,
+                    instructions=inst
+                )
+                datapath.send_msg(mod)
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def _flow_stats_reply_handler(self, ev):
