@@ -155,7 +155,7 @@ class ElephantManager(app_manager.RyuApp):
 
             pkt_out = packet.Packet()
             eth_out = ethernet.ethernet(
-                dst = eth_in.src,
+                dst = eth.src,
                 src = destination_host_mac,
                 ethertype = ether_types.ETH_TYPE_ARP
             )
@@ -172,7 +172,7 @@ class ElephantManager(app_manager.RyuApp):
 
             actions = [
                 parser.OFPActionOutput(
-                    in_port
+                    input_port
                 )
             ]
 
@@ -222,10 +222,6 @@ class ElephantManager(app_manager.RyuApp):
             dpid, port_no = self.find_destination_switch(mac_src)
 
             if dpid is None or port_no is None:
-                return
-            
-            ip_pkt = pkt.get_protocol(ipv4.ipv4)
-            if not ip_pkt:
                 return
             
             #Controllare il protocollo
