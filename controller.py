@@ -26,7 +26,7 @@ with open('config.txt', 'r') as file:
             PACKET_THRESHOLD = int(packet_threshold_match.group(1))
             packet_threshold_found = True
         if idle_timeout_found:
-            IDLE_TIMEOUT = int(seconds_between_analysis_match.group(1))
+            IDLE_TIMEOUT = int(idle_timeout_match.group(1))
             idle_timeout_found = True
 
     if packet_threshold_found:
@@ -36,7 +36,7 @@ with open('config.txt', 'r') as file:
         print("Using default packet threshold:", PACKET_THRESHOLD)
 
     if idle_timeout_found:
-        print("Idle timeout:", SECONDS_BETWEEN_ANALYSIS)
+        print("Idle timeout:", IDLE_TIMEOUT)
     else:
         IDLE_TIMEOUT = DEFAULT_IDLE_TIMEOUT
         print("Using default idle timeout:", IDLE_TIMEOUT)
@@ -235,7 +235,8 @@ class ElephantManager(app_manager.RyuApp):
                     datapath=datapath,
                     priority=10,
                     match = match,
-                    instructions=inst
+                    instructions=inst,
+                    idle_timeout=IDLE_TIMEOUT
                 )
                 datapath.send_msg(mod)
 
