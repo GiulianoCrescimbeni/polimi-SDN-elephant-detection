@@ -21,7 +21,7 @@ with open('config.txt', 'r') as file:
     idle_timeout_found = False
     for line in file:
         packet_threshold_match = re.search(r'PACKET_THRESHOLD\s*=\s*(\d+)', line)
-        idle_timeout_found = re.search(r'IDLE_TIMEOUT\s*=\s*(\d+)', line)
+        idle_timeout_match = re.search(r'IDLE_TIMEOUT\s*=\s*(\d+)', line)
         if packet_threshold_match:
             PACKET_THRESHOLD = int(packet_threshold_match.group(1))
             packet_threshold_found = True
