@@ -320,7 +320,7 @@ class ElephantManager(app_manager.RyuApp):
 
             inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
 
-            mod = parser.OFPFlowMod(datapath=datapath, priority=10, match=match, instructions=inst)
+            mod = parser.OFPFlowMod(datapath=datapath, priority=10, match=match, instructions=inst, idle_timeout=IDLE_TIMEOUT)
             datapath.send_msg(mod)
 
     def get_datapath(self, dpid):
