@@ -10,12 +10,12 @@ import re
 import time
 import threading
 
-DEFAULT_PACKET_THRESHOLD = 2000  # Soglia predefinita per il numero di pacchetti
-DEFAULT_IDLE_TIMEOUT = 30 # Soglia predefinita per l'inattività di una connessione in secondi
+DEFAULT_PACKET_THRESHOLD = 2000  # Default threshold for number of packets of an elephant
+DEFAULT_IDLE_TIMEOUT = 30 # Default timeout for connection inactivity in seconds
 PACKET_THRESHOLD = 0
 IDLE_TIMEOUT = 0
 
-# Caricamento delle configurazioni
+# Loading configurations
 with open('config.txt', 'r') as file:
     packet_threshold_found = False
     idle_timeout_found = False
@@ -41,7 +41,7 @@ with open('config.txt', 'r') as file:
         IDLE_TIMEOUT = DEFAULT_IDLE_TIMEOUT
         print("Using default idle timeout:", IDLE_TIMEOUT)
 
-# Struttura dati per contenere le connessioni
+# Data structure to hold connections
 elephants = {}
 
 class ElephantManager(app_manager.RyuApp):
@@ -49,13 +49,14 @@ class ElephantManager(app_manager.RyuApp):
     topo = None
     switch_list = []
 
-
+    # Method to find destination switch based on MAC address
     def find_destination_switch(self, mac_destination):
         for host in get_all_host(self):
             if host.mac == mac_destination:
                 return (host.port.dpid, host.port.port_no)
         return (None, None)
 
+    # Method to find next switch port based on source and destination switches
     def find_next_host_destination(self, source_id, destination_id):
         self.topo = nx.DiGraph()
 
@@ -67,6 +68,7 @@ class ElephantManager(app_manager.RyuApp):
         link_next_hop = self.topo[path[0]][path[1]]
         return link_next_hop['port']
 
+    # Event handler for switch features configuration
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def _config_dispatcher_handler(self, ev):
         datapath = ev.msg.datapath
@@ -91,6 +93,7 @@ class ElephantManager(app_manager.RyuApp):
         )
         datapath.send_msg(mod)
 
+    # Event handler for packet in
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
 
@@ -99,7 +102,7 @@ class ElephantManager(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         input_port = ev.msg.match['in_port']
 
-        #Parsing del pacchetto
+        # Parsing
         pkt = packet.Packet(ev.msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
         arp_in = pkt.get_protocol(arp.arp)
@@ -114,7 +117,7 @@ class ElephantManager(app_manager.RyuApp):
                     destination_host_mac = host.mac
                     break
 
-            # Host non trovato
+            # Host not found
             if destination_host_mac is None:
                 return
 
@@ -152,26 +155,26 @@ class ElephantManager(app_manager.RyuApp):
 
         else:
 
-            #Controllare se il pacchetto è IPV4
+            # Check if the packet is IPV4
             if eth.ethertype != ether_types.ETH_TYPE_IP:
                 return
 
             mac_dst = eth.dst
             mac_src = eth.src
 
-            #Trovare lo switch destinazione
+            # Find destination switch
             dpid, port_no = self.find_destination_switch(mac_dst)
 
             if dpid is None or port_no is None:
                 return
 
-            #Trovare il percorso più breve verso lo switch destinazione
+            # Find shortest path to destination switch
             if datapath.id == dpid:
                 output_port = port_no
             else:
                 output_port = self.find_next_host_destination(datapath.id, dpid)
 
-            #Inoltrare il pacchetto verso la destinazione
+            # Forward packet to destination
             actions = [parser.OFPActionOutput(output_port)]
 
             out = parser.OFPPacketOut(
@@ -189,14 +192,14 @@ class ElephantManager(app_manager.RyuApp):
             if dpid is None or port_no is None:
                 return
 
-            #Controllare il protocollo
+            # Check if tcp
             tcp_pkt = pkt.get_protocol(tcp.tcp)
             if not tcp_pkt:
                 return
 
-            #Verifica che l'host sorgente sia direttamente collegato allo switch
+            # Verify source host is directly connected to the switch
             if datapath.id == dpid:
-                #Aggiorno il contatore di pacchetti solo se il mac sorgente è collegato allo switch
+                # Update packet count only if source MAC is connected to the switch
                 if (mac_src, mac_dst) not in elephants:
                     elephants[(mac_src, mac_dst)] = (1, [datapath], False, False)
                     packet_count, route, isElephant, statsReq = elephants[(mac_src, mac_dst)]
@@ -215,8 +218,8 @@ class ElephantManager(app_manager.RyuApp):
 
             if elephants[(mac_src, mac_dst)][0] >= PACKET_THRESHOLD:
                 elephants[(mac_src, mac_dst)] = (packet_count, route, True, False)
-                print(f"Elefante identificato da {mac_src} verso {mac_dst}")
-                #Inserire la regola sullo switch per l'instradamento diretto dei pacchetti
+                print(f"Elephant identified from {mac_src} to {mac_dst}")
+                # Rule for direct routing of packets
                 datapath = ev.msg.datapath
                 ofproto = datapath.ofproto
                 parser = datapath.ofproto_parser
@@ -240,71 +243,63 @@ class ElephantManager(app_manager.RyuApp):
                 )
                 datapath.send_msg(mod)
 
+    # Handler for topology changes
     @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
     @set_ev_cls(event.EventLinkAdd, MAIN_DISPATCHER)
     def _topology_change_handler(self, ev):
-        # Aggiorna la topologia
+        # Update the topology
         self.update_topology()
-        # Ricalcola i percorsi per tutte le connessioni elefanti attive
+        # Recalculate routes for all active elephant connections
         for key, value in elephants.items():
             packet_count, route, isElephant, statsReq = value
             if isElephant:
-                # Trova un nuovo percorso
+                # Find a new path
                 new_route = self.find_new_route(key[0], key[1])
                 if new_route:
-                    # Aggiorna il percorso dell'elefante
+                    # Update the path
                     route_tmp = self.build_datapath_route_list(new_route)
                     print(f'NEW ROUTE: ', new_route)
-                    print(f'NEW ROUTE: ', new_route)
                     print(f'ROUTE TMP: ', route_tmp)
-                    print(f'ROUTE TMP: ', route_tmp)
-                    elephants[key] = (packet_count, route_tmp, isElephant, statsReq) #elephants[key] = (packet_count, new_route, isElephant, statsReq)
-                    # Aggiorna le regole di instradamento
+                    elephants[key] = (packet_count, route_tmp, isElephant, statsReq)
+                    # Update routing rules
                     self.update_flow_rules(key[0], key[1], new_route)
 
+    # Function to update the topology
     def update_topology(self):
-        # Inizializza una nuova rappresentazione della topologia come un grafo diretto
         self.topo = nx.DiGraph()
 
-        # Ottieni tutti gli switch e i link attualmente presenti nella rete
         switches = get_all_switch(self)
         links = get_all_link(self)
 
-        # Aggiungi gli switch come nodi nel grafo
         for switch in switches:
             self.topo.add_node(switch.dp.id)
 
-        # Aggiungi i link come archi nel grafo
         for link in links:
             self.topo.add_edge(link.src.dpid, link.dst.dpid, port=link.src.port_no)
 
-        # Ora la topologia è aggiornata con le informazioni correnti
-        print("Topologia aggiornata con successo.")
+        print("Topology updated successfully.")
 
 
+    # Function to find a new route from mac_src to mac_dst
     def find_new_route(self, mac_src, mac_dst):
-        # Assicurati che la topologia sia aggiornata
         self.update_topology()
 
-        # Trova lo switch di partenza e di arrivo per i MAC forniti
         src_dpid, _ = self.find_destination_switch(mac_src)
         dst_dpid, _ = self.find_destination_switch(mac_dst)
 
-        # Se entrambi gli switch sono presenti nella topologia, cerca un nuovo percorso
         if src_dpid and dst_dpid:
             try:
-                # Usa NetworkX per trovare il percorso più breve
                 path = nx.shortest_path(self.topo, src_dpid, dst_dpid)
                 return path
             except nx.NetworkXNoPath:
-                print("Nessun percorso trovato.")
+                print("No path found.")
                 return None
         else:
-            print("Uno degli switch non è presente nella topologia.")
+            print("One of the switches is missing from the topology.")
             return None
 
+    # Function to update flow rules
     def update_flow_rules(self, mac_src, mac_dst, route):
-        # Per ogni switch nel percorso, aggiorna le regole di flusso
         for i in range(len(route) - 1):
             switch = route[i]
             next_switch = route[i + 1]
@@ -314,7 +309,6 @@ class ElephantManager(app_manager.RyuApp):
             ofproto = datapath.ofproto
             parser = datapath.ofproto_parser
 
-            # Crea una regola di flusso per inoltrare i pacchetti al prossimo switch
             match = parser.OFPMatch(eth_src=mac_src, eth_dst=mac_dst)
             actions = [parser.OFPActionOutput(out_port)]
 
@@ -324,11 +318,9 @@ class ElephantManager(app_manager.RyuApp):
             datapath.send_msg(mod)
 
     def get_datapath(self, dpid):
-        # Cerca tra tutti gli switch conosciuti per trovare quello con il dpid corrispondente
         for switch in self.switch_list:
             if switch.id == dpid:
                 return switch
-        # Se non viene trovato nessuno switch con il dpid fornito, restituisci None
         return None
 
     def build_datapath_route_list(self, new_route):
@@ -340,11 +332,11 @@ class ElephantManager(app_manager.RyuApp):
             tmp.append(self.get_datapath(switch))
         return tmp
 
+    # Config Dispatcher event for switch configuration
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         dpid = datapath.id
         self.switch_list.append(datapath)
-        # Assicurati di non aggiungere duplicati
         self.switch_list = list(set(self.switch_list))
-        print(f"Switch {dpid} aggiunto alla lista degli switch.")
+        print(f"Switch {dpid} added to the switch list.")
