@@ -8,6 +8,7 @@ This project was developed for the **"Software Defined Networking"** course at *
 - Identifying connections that exceed a predefined traffic threshold.
 - Installing OpenFlow rules on switches to route high-traffic connections without controller intervention.
 - Proxy ARP for address resolution protocol management
+- Detecting topology changes for faults on links
 
 ## Prerequisites
 - Python 3.6+
