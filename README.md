@@ -1,5 +1,7 @@
 # Identification and Management of "Elephants" in Ryu
 
+### Grade: 30/30
+
 ## Project Description
 This project was developed for the **"Software Defined Networking"** course at **Politecnico di Milano**. It aims to identify and manage high-traffic TCP connections, referred to as "elephants", in an SDN network using Ryu as the controller. A TCP connection is considered an elephant when its traffic volume exceeds a certain threshold. Short-lived connections are handled packet by packet, while for high-traffic connections, an OpenFlow rule is installed on the switch to route packets directly without involving the controller.
 
