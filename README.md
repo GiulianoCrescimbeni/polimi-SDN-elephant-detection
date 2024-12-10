@@ -42,6 +42,8 @@ ryu-manager controller.py
 ## Testbed
 The project was deployed on a real network testbed to simulate a real network
 
+[![Testbed](https://i.postimg.cc/rFDgQWsy/Annotazione-2024-12-10-030116.png)](https://postimg.cc/RNzc0Ww2)
+
 ### Functional Topology
 #### Control Plane
 - **SDN switches** connected through an **unmanaged switch** and a **WLAN mini-router**.
